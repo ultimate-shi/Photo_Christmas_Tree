@@ -1,0 +1,597 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>流光圣诞树：终极交互版</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #020202; font-family: 'Segoe UI', sans-serif; }
+        #canvas-container { width: 100vw; height: 100vh; position: absolute; top: 0; left: 0; z-index: 1; }
+        
+        /* 摄像头小窗 */
+        #video-element {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            width: 160px;
+            height: 120px;
+            border-radius: 12px;
+            transform: scaleX(-1);
+            z-index: 2;
+            opacity: 0.6;
+            border: 2px solid #ffd700;
+            box-shadow: 0 0 15px rgba(255, 215, 0, 0.2);
+        }
+
+        /* 顶部状态栏 */
+        #status-bar {
+            position: absolute;
+            top: 30px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 5;
+            text-align: center;
+            color: #ffd700;
+            pointer-events: none;
+            text-shadow: 0 2px 10px rgba(0,0,0,0.8);
+        }
+        .mode-title { font-size: 24px; font-weight: bold; letter-spacing: 2px; margin-bottom: 5px; }
+        .hint-text { font-size: 14px; color: rgba(255,255,255,0.7); background: rgba(0,0,0,0.4); padding: 5px 15px; border-radius: 20px;}
+
+        /* UI 按钮 */
+        #ui-container {
+            position: absolute;
+            bottom: 30px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 10;
+            display: flex;
+            gap: 20px;
+        }
+
+        .gold-btn {
+            background: linear-gradient(135deg, #b88a00 0%, #ffe680 50%, #b88a00 100%);
+            border: none;
+            color: #2a1d00;
+            padding: 12px 30px;
+            border-radius: 50px;
+            font-weight: bold;
+            font-size: 15px;
+            cursor: pointer;
+            box-shadow: 0 5px 20px rgba(0,0,0,0.6);
+            transition: transform 0.2s;
+        }
+        .gold-btn:hover { transform: scale(1.05); }
+
+        #file-input { display: none; }
+        #loader {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
+            color: #ffd700; font-size: 22px; z-index: 20; background: rgba(0,0,0,0.9);
+            padding: 20px 40px; border-radius: 10px; border: 1px solid #ffd700;
+            transition: opacity 0.5s;
+        }
+    </style>
+    
+    <!-- 依赖库 -->
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
+                "lil-gui": "https://unpkg.com/lil-gui@0.19.1/dist/lil-gui.esm.min.js"
+            }
+        }
+    </script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+</head>
+<body>
+
+    <div id="loader">🎄 正在编织金色粒子...</div>
+    
+    <div id="status-bar">
+        <div class="mode-title" id="mode-text">金色圣诞树</div>
+        <div class="hint-text">🖐️张开变星云 | 👋左右移动旋转 | 👌比"L"放大照片</div>
+    </div>
+
+    <div id="canvas-container"></div>
+    <video id="video-element" playsinline></video>
+
+    <div id="ui-container">
+        <button class="gold-btn" onclick="document.getElementById('file-input').click()">📂 上传多张照片</button>
+        <button class="gold-btn" id="fs-btn">全屏模式</button>
+    </div>
+    
+    <input type="file" id="file-input" accept="image/*" multiple>
+
+    <!-- 粒子着色器 -->
+    <script type="x-shader/x-vertex" id="vertexshader">
+        attribute float sizeRandom;
+        attribute vec3 customColor;
+        varying vec3 vColor;
+        uniform float uTime;
+        uniform float uSizeMean;
+        
+        void main() {
+            vColor = customColor;
+            vec4 mvPosition = modelViewMatrix * vec4( position, 1.0 );
+            
+            // 呼吸效果：随时间正弦波动
+            float breath = 0.5 + 0.5 * sin(uTime * 2.5 + sizeRandom * 50.0);
+            
+            // 粒子大小计算
+            gl_PointSize = uSizeMean * (0.6 + sizeRandom * 0.8) * (0.9 + 0.3 * breath) * ( 400.0 / -mvPosition.z );
+            
+            gl_Position = projectionMatrix * mvPosition;
+        }
+    </script>
+
+    <script type="x-shader/x-fragment" id="fragmentshader">
+        varying vec3 vColor;
+        
+        void main() {
+            // 圆形光点
+            vec2 xy = gl_PointCoord.xy - vec2(0.5);
+            float ll = length(xy);
+            if(ll > 0.5) discard;
+            
+            // 边缘柔化
+            float alpha = smoothstep(0.5, 0.3, ll);
+            
+            gl_FragColor = vec4(vColor, alpha);
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import GUI from 'lil-gui';
+
+        // --- 全局变量 ---
+        let scene, camera, renderer, particleSystem, uniforms;
+        let mainGroup; // 旋转容器
+        let controls;
+        let photos = []; 
+        let focusedPhotoIndex = -1; 
+        
+        // 常量
+        const PARTICLE_COUNT = 28000;
+        
+        // 状态管理
+        const state = {
+            mode: 'tree', 
+            zoomActive: false,
+            particleSize: 7.0,
+            
+            // 手势数值
+            handOpenness: 0, // 0-1
+            pinchDistance: 0, // 0-1
+            handX: 0.5,       // 0-1 (屏幕位置)
+            
+            // 旋转速度
+            rotationVelocity: 0.002
+        };
+
+        // 粒子目标位置缓冲
+        const posTree = new Float32Array(PARTICLE_COUNT * 3);
+        const posSphere = new Float32Array(PARTICLE_COUNT * 3);
+
+        // --- 1. 初始化场景 ---
+        function init() {
+            const container = document.getElementById('canvas-container');
+            
+            scene = new THREE.Scene();
+            scene.fog = new THREE.FogExp2(0x020202, 0.015);
+
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.set(0, 0, 30); // 相机拉远一点以便球体充满屏幕
+
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            container.appendChild(renderer.domElement);
+
+            controls = new OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+            controls.enableRotate = false; // 禁用鼠标旋转，改用手势
+
+            // 创建主容器
+            mainGroup = new THREE.Group();
+            scene.add(mainGroup);
+
+            // 灯光系统
+            const ambient = new THREE.AmbientLight(0xffffff, 0.6);
+            scene.add(ambient);
+            const dirLight = new THREE.DirectionalLight(0xffd700, 2); // 强金光
+            dirLight.position.set(10, 10, 20);
+            scene.add(dirLight);
+
+            // 初始化粒子系统
+            initParticles();
+            
+            // 事件监听
+            window.addEventListener('resize', onResize);
+            document.getElementById('fs-btn').addEventListener('click', () => {
+                if(!document.fullscreenElement) document.documentElement.requestFullscreen();
+                else document.exitFullscreen();
+            });
+            document.getElementById('file-input').addEventListener('change', handleUpload);
+
+            // 初始化GUI
+            initGUI();
+        }
+
+        // --- 2. 粒子系统 (核心需求 1 & 2) ---
+        function initParticles() {
+            const geometry = new THREE.BufferGeometry();
+            const positions = new Float32Array(PARTICLE_COUNT * 3);
+            const colors = new Float32Array(PARTICLE_COUNT * 3);
+            const sizes = new Float32Array(PARTICLE_COUNT);
+
+            // 颜色定义
+            const colGold = new THREE.Color(0xffcc00); // 暖金
+            const colRed = new THREE.Color(0xd40000);  // 圣诞红
+            const colGreen = new THREE.Color(0x008822); // 圣诞绿
+
+            // 预计算坐标
+            calculateTreePositions();
+            calculateSpherePositions();
+
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                // 默认位置
+                positions[i*3] = posTree[i*3];
+                positions[i*3+1] = posTree[i*3+1];
+                positions[i*3+2] = posTree[i*3+2];
+
+                sizes[i] = Math.random();
+
+                // 颜色概率分布 (Requirement 1)
+                const r = Math.random();
+                let c;
+                if (r < 0.80) {
+                    c = colGold; // 80% 金色
+                    // 给金色一点微小的明暗变化
+                    c = c.clone().multiplyScalar(0.8 + Math.random() * 0.4);
+                } else if (r < 0.90) {
+                    c = colRed;  // 10% 红色
+                } else {
+                    c = colGreen; // 10% 绿色
+                }
+
+                colors[i*3] = c.r;
+                colors[i*3+1] = c.g;
+                colors[i*3+2] = c.b;
+            }
+
+            geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            geometry.setAttribute('customColor', new THREE.BufferAttribute(colors, 3));
+            geometry.setAttribute('sizeRandom', new THREE.BufferAttribute(sizes, 1));
+
+            // Shader Material
+            uniforms = {
+                uTime: { value: 0.0 },
+                uSizeMean: { value: state.particleSize }
+            };
+
+            const material = new THREE.ShaderMaterial({
+                uniforms: uniforms,
+                vertexShader: document.getElementById('vertexshader').textContent,
+                fragmentShader: document.getElementById('fragmentshader').textContent,
+                blending: THREE.AdditiveBlending,
+                depthWrite: false,
+                transparent: true
+            });
+
+            particleSystem = new THREE.Points(geometry, material);
+            mainGroup.add(particleSystem); // 添加到旋转容器
+        }
+
+        function calculateTreePositions() {
+            const height = 22;
+            const maxRadius = 9;
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                const ratio = i / PARTICLE_COUNT;
+                const y = (ratio * height) - (height / 2);
+                const r = (1 - Math.pow(ratio, 0.8)) * maxRadius; // 锥形
+                const angle = i * 2.4; 
+                
+                // 树的内部填充 + 表面
+                const rVar = r * Math.sqrt(Math.random()); 
+                
+                posTree[i*3] = Math.cos(angle) * rVar;
+                posTree[i*3+1] = y;
+                posTree[i*3+2] = Math.sin(angle) * rVar;
+            }
+        }
+
+        function calculateSpherePositions() {
+            // Requirement 2: 占满屏幕，密度小
+            // 摄像机z=30，半径设为 25 左右可以包围视线
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                const r = 25 * Math.cbrt(Math.random()); // 均匀分布在球体内
+                const theta = Math.random() * 2 * Math.PI;
+                const phi = Math.acos(2 * Math.random() - 1);
+                
+                posSphere[i*3] = r * Math.sin(phi) * Math.cos(theta);
+                posSphere[i*3+1] = r * Math.sin(phi) * Math.sin(theta);
+                posSphere[i*3+2] = r * Math.cos(phi);
+            }
+        }
+
+        // --- 3. 照片管理 ---
+        function handleUpload(e) {
+            const files = e.target.files;
+            if(!files.length) return;
+
+            Array.from(files).forEach((file) => {
+                const reader = new FileReader();
+                reader.onload = (evt) => {
+                    const img = new Image();
+                    img.onload = () => createPhotoFrame(img);
+                    img.src = evt.target.result;
+                };
+                reader.readAsDataURL(file);
+            });
+        }
+
+        function createPhotoFrame(image) {
+            const group = new THREE.Group();
+            
+            // 基础尺寸
+            const h = 4;
+            const w = h * (image.width / image.height);
+
+            // 图片Mesh
+            const tex = new THREE.Texture(image);
+            tex.colorSpace = THREE.SRGBColorSpace;
+            tex.needsUpdate = true;
+            const plane = new THREE.Mesh(
+                new THREE.PlaneGeometry(w, h),
+                new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide })
+            );
+            plane.position.z = 0.05;
+
+            // 金色画框
+            const frameGeo = new THREE.BoxGeometry(w + 0.4, h + 0.4, 0.2);
+            const frameMat = new THREE.MeshStandardMaterial({
+                color: 0xffd700,
+                metalness: 0.9,
+                roughness: 0.2,
+                emissive: 0x443300,
+                emissiveIntensity: 0.2
+            });
+            const frame = new THREE.Mesh(frameGeo, frameMat);
+            
+            group.add(frame);
+            group.add(plane);
+            mainGroup.add(group); // 照片放入旋转容器
+
+            // 计算在两种形态下的位置
+            // 树：挂在树表面
+            const tRatio = Math.random() * 0.7 + 0.15; // 避开极顶和极底
+            const tH = 22;
+            const tY = (tRatio * tH) - (tH / 2);
+            const tR = (1 - Math.pow(tRatio, 0.8)) * 9 + 0.5; // 在树枝外一点
+            const tAng = Math.random() * Math.PI * 2;
+            const treePos = new THREE.Vector3(Math.cos(tAng)*tR, tY, Math.sin(tAng)*tR);
+
+            // 球：随机散布在球体中 (Requirement 2)
+            const sR = 10 + Math.random() * 10;
+            const sTheta = Math.random() * Math.PI * 2;
+            const sPhi = Math.acos(2 * Math.random() - 1);
+            const spherePos = new THREE.Vector3(
+                sR * Math.sin(sPhi) * Math.cos(sTheta),
+                sR * Math.sin(sPhi) * Math.sin(sTheta),
+                sR * Math.cos(sPhi)
+            );
+
+            // 初始位置
+            group.position.copy(treePos);
+            group.lookAt(0, tY, 0); 
+
+            photos.push({
+                group: group,
+                treePos: treePos,
+                spherePos: spherePos,
+                treeLookAt: new THREE.Vector3(0, tY, 0), // 面向中心轴
+                sphereLookAt: new THREE.Vector3(0, 0, 0) // 面向球心
+            });
+        }
+
+        // --- 4. MediaPipe 手势逻辑 ---
+        function initMediaPipe() {
+            const videoElement = document.getElementById('video-element');
+            const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+            
+            hands.setOptions({ maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: 0.6, minTrackingConfidence: 0.6 });
+
+            hands.onResults(results => {
+                if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                    const lm = results.multiHandLandmarks[0];
+                    
+                    // 1. 手腕X位置 (控制旋转)
+                    state.handX = lm[0].x;
+
+                    // 2. 手掌张开 (四指)
+                    const tips = [8, 12, 16, 20];
+                    let avgDist = 0;
+                    tips.forEach(idx => avgDist += Math.hypot(lm[idx].x - lm[0].x, lm[idx].y - lm[0].y));
+                    avgDist /= 4;
+                    const openVal = Math.max(0, Math.min(1, (avgDist - 0.2) * 5));
+                    state.handOpenness += (openVal - state.handOpenness) * 0.1;
+
+                    // 3. 拇指食指L型 (控制Zoom)
+                    const pinchD = Math.hypot(lm[4].x - lm[8].x, lm[4].y - lm[8].y);
+                    const pinchVal = Math.max(0, Math.min(1, (pinchD - 0.05) * 6)); // 0.2以上算张开
+                    state.pinchDistance += (pinchVal - state.pinchDistance) * 0.15; // 稍微灵敏点
+
+                } else {
+                    state.handOpenness *= 0.9;
+                    state.pinchDistance *= 0.9;
+                    state.handX = 0.5; // 回中
+                }
+            });
+
+            const cameraUtils = new Camera(videoElement, {
+                onFrame: async () => await hands.send({image: videoElement}),
+                width: 640, height: 480
+            });
+            cameraUtils.start().then(() => document.getElementById('loader').style.opacity = 0);
+        }
+
+        // --- 5. 核心动画循环 ---
+        function animate() {
+            requestAnimationFrame(animate);
+            
+            const time = performance.now() * 0.001;
+            uniforms.uTime.value = time;
+            uniforms.uSizeMean.value = state.particleSize;
+
+            controls.update();
+
+            // --- 逻辑判断 ---
+            
+            // 1. 旋转控制 (Requirement 3)
+            // handX: 0(右) ... 0.5(中) ... 1(左) [镜像后]
+            // 我们希望 handX < 0.4 向左转, > 0.6 向右转
+            let targetVelocity = 0.002; // 默认慢速自转
+            if (state.handX < 0.4) {
+                targetVelocity = (0.4 - state.handX) * 0.05; // 向左加速
+            } else if (state.handX > 0.6) {
+                targetVelocity = -(state.handX - 0.6) * 0.05; // 向右加速
+            }
+            // 平滑速度变化
+            state.rotationVelocity += (targetVelocity - state.rotationVelocity) * 0.05;
+            mainGroup.rotation.y += state.rotationVelocity;
+
+            // 2. 模式切换
+            if (state.handOpenness > 0.6) {
+                state.mode = 'sphere';
+                document.getElementById('mode-text').innerText = "璀璨星云模式";
+            } else {
+                state.mode = 'tree';
+                document.getElementById('mode-text').innerText = "金色圣诞树模式";
+            }
+
+            // 3. 放大检测 (Requirement 4 - 稳定性修复)
+            // 设定阈值 0.7 触发
+            const isZoomGesture = state.pinchDistance > 0.7 && photos.length > 0;
+            
+            if (isZoomGesture) {
+                // 如果之前没在放大，说明是刚开始触发 -> 锁定最近的照片
+                if (!state.zoomActive) {
+                    state.zoomActive = true;
+                    focusedPhotoIndex = findClosestPhoto();
+                }
+                // 如果已经在放大了，就保持 focusedPhotoIndex 不变 (不重新计算)，解决闪烁问题
+            } else {
+                state.zoomActive = false;
+                focusedPhotoIndex = -1; // 释放锁定
+            }
+
+            // --- 粒子更新 ---
+            const positions = particleSystem.geometry.attributes.position.array;
+            const blend = state.handOpenness; // 0=Tree, 1=Sphere
+
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                const idx = i * 3;
+                const tx = posTree[idx] * (1 - blend) + posSphere[idx] * blend;
+                const ty = posTree[idx+1] * (1 - blend) + posSphere[idx+1] * blend;
+                const tz = posTree[idx+2] * (1 - blend) + posSphere[idx+2] * blend;
+                
+                positions[idx] += (tx - positions[idx]) * 0.08;
+                positions[idx+1] += (ty - positions[idx+1]) * 0.08;
+                positions[idx+2] += (tz - positions[idx+2]) * 0.08;
+            }
+            particleSystem.geometry.attributes.position.needsUpdate = true;
+
+            // --- 照片更新 ---
+            photos.forEach((p, i) => {
+                // 默认目标：根据树或球模式的位置
+                let targetLocalPos = state.mode === 'tree' ? p.treePos : p.spherePos;
+                let targetLocalLookAt = state.mode === 'tree' ? p.treeLookAt : p.sphereLookAt;
+                let targetScale = 1.0;
+
+                // 如果该照片被选中放大
+                if (state.zoomActive && i === focusedPhotoIndex) {
+                    // 核心算法：在旋转的父容器中，计算出“位于相机正前方”的局部坐标
+                    
+                    // 1. 获取相机的世界位置前方一定距离的点
+                    const cameraWorldDir = new THREE.Vector3();
+                    camera.getWorldDirection(cameraWorldDir);
+                    const desiredWorldPos = camera.position.clone().add(cameraWorldDir.multiplyScalar(8)); // 距离相机8单位
+                    
+                    // 2. 将该世界坐标 转换为 mainGroup 的局部坐标
+                    targetLocalPos = mainGroup.worldToLocal(desiredWorldPos.clone());
+                    
+                    // 3. 让照片看向相机 (需要一些四元数计算来抵消父容器旋转，简单做法是每帧 LookAt)
+                    targetScale = 1.8;
+                }
+
+                // 动画插值
+                p.group.position.lerp(targetLocalPos, 0.1);
+                p.group.scale.setScalar(THREE.MathUtils.lerp(p.group.scale.x, targetScale, 0.1));
+
+                if (state.zoomActive && i === focusedPhotoIndex) {
+                    // 放大时，强制面向相机 (抵消父容器旋转)
+                    // 由于父容器在转，我们必须每帧计算
+                    p.group.lookAt(mainGroup.worldToLocal(camera.position.clone()));
+                } else {
+                    // 普通状态：平滑转向目标朝向
+                    // 这里简化处理：直接 LookAt 目标点（如中心轴）
+                    const lookTarget = targetLocalLookAt.clone();
+                    p.group.lookAt(lookTarget);
+                }
+            });
+
+            renderer.render(scene, camera);
+        }
+
+        function findClosestPhoto() {
+            // 计算屏幕中心最近的照片索引
+            let minD = Infinity;
+            let idx = -1;
+            
+            // 投影矩阵辅助
+            const frustum = new THREE.Frustum();
+            frustum.setFromProjectionMatrix(new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse));
+
+            photos.forEach((p, i) => {
+                // 获取照片的世界坐标
+                const worldPos = p.group.position.clone().applyMatrix4(mainGroup.matrixWorld);
+                
+                if(frustum.containsPoint(worldPos)){
+                    const v = worldPos.project(camera); // 投影到NDC
+                    const d = v.distanceTo(new THREE.Vector3(0,0,0)); // 离屏幕中心距离
+                    if(d < minD) {
+                        minD = d;
+                        idx = i;
+                    }
+                }
+            });
+            return idx;
+        }
+
+        function initGUI() {
+            const gui = new GUI({ title: '参数设置' });
+            gui.domElement.style.top = '20px';
+            gui.domElement.style.right = '20px';
+            gui.add(state, 'particleSize', 1.0, 15.0).name('粒子大小');
+        }
+
+        function onResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        // 启动
+        init();
+        initMediaPipe();
+        animate();
+
+    </script>
+</body>
+</html>
