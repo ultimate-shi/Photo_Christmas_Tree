@@ -1,0 +1,482 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D 粒子圣诞树与照片展示</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #050505; font-family: 'Segoe UI', sans-serif; }
+        #canvas-container { width: 100vw; height: 100vh; position: absolute; top: 0; left: 0; z-index: 1; }
+        
+        /* 摄像头小窗 */
+        #video-element {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            width: 160px;
+            height: 120px;
+            border-radius: 10px;
+            transform: scaleX(-1);
+            z-index: 2;
+            opacity: 0.6;
+            border: 2px solid rgba(255, 255, 255, 0.2);
+            pointer-events: none;
+        }
+
+        /* 加载提示 */
+        #loader {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: #00ff88;
+            font-size: 20px;
+            z-index: 10;
+            pointer-events: none;
+            transition: opacity 0.5s;
+            text-shadow: 0 0 10px #00ff88;
+        }
+
+        /* 界面 UI 容器 */
+        #ui-container {
+            position: absolute;
+            bottom: 30px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 5;
+            display: flex;
+            gap: 15px;
+            align-items: center;
+        }
+
+        /* 按钮样式 */
+        .glass-btn {
+            background: rgba(255, 255, 255, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            color: white;
+            padding: 10px 24px;
+            border-radius: 30px;
+            cursor: pointer;
+            backdrop-filter: blur(8px);
+            transition: all 0.3s;
+            font-size: 14px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+        }
+        .glass-btn:hover { 
+            background: rgba(255, 255, 255, 0.25); 
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(0,255,136,0.2);
+        }
+
+        /* 隐藏的文件输入框 */
+        #file-input { display: none; }
+
+        #instruction {
+            position: absolute;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: rgba(255, 255, 255, 0.5);
+            z-index: 2;
+            pointer-events: none;
+            font-size: 14px;
+        }
+    </style>
+    <!-- Import Maps -->
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
+                "lil-gui": "https://unpkg.com/lil-gui@0.19.1/dist/lil-gui.esm.min.js"
+            }
+        }
+    </script>
+    <!-- MediaPipe -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+</head>
+<body>
+
+    <div id="loader">🎄 正在种植圣诞树 & 启动摄像头...</div>
+    <div id="instruction">双手张合控制树的大小 · 上传照片放入树心</div>
+    
+    <div id="canvas-container"></div>
+    <video id="video-element" playsinline></video>
+
+    <!-- 底部控制栏 -->
+    <div id="ui-container">
+        <button class="glass-btn" onclick="document.getElementById('file-input').click()">📷 上传照片</button>
+        <button class="glass-btn" id="fullscreen-btn">全屏体验</button>
+    </div>
+    
+    <input type="file" id="file-input" accept="image/*">
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import GUI from 'lil-gui';
+
+        // --- 全局变量 ---
+        let scene, camera, renderer, particles, geometry, material;
+        let photoMesh = null; // 用于存储照片的 Mesh
+        let controls;
+        const PARTICLE_COUNT = 18000;
+        const PARTICLE_SIZE = 0.18;
+        
+        // 形状数据
+        const shapes = {
+            tree: [],
+            heart: [],
+            sphere: []
+        };
+        
+        // 状态管理
+        const state = {
+            currentShape: 'tree',
+            color: '#00ff88', // 默认圣诞绿
+            handDistance: 0.8, // 初始张开状态
+            photoScale: 1.0,
+            autoRotate: true
+        };
+
+        // 粒子目标位置缓冲
+        let targetPositions = new Float32Array(PARTICLE_COUNT * 3);
+
+        // --- 1. 初始化场景 ---
+        function initThree() {
+            const container = document.getElementById('canvas-container');
+            
+            scene = new THREE.Scene();
+            scene.fog = new THREE.FogExp2(0x050505, 0.02);
+
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.set(0, 2, 16);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            container.appendChild(renderer.domElement);
+
+            controls = new OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+            controls.autoRotate = state.autoRotate;
+            controls.autoRotateSpeed = 1.0;
+
+            // 创建灯光（为了照亮照片）
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.8);
+            scene.add(ambientLight);
+            const dirLight = new THREE.DirectionalLight(0xffffff, 1);
+            dirLight.position.set(5, 5, 10);
+            scene.add(dirLight);
+
+            // 创建粒子系统
+            createParticleSystem();
+            
+            // 生成形状数据
+            generateShapeData();
+            
+            // 初始设置为圣诞树
+            transitionToShape('tree');
+
+            // 监听事件
+            window.addEventListener('resize', onWindowResize);
+            document.getElementById('fullscreen-btn').addEventListener('click', toggleFullScreen);
+            document.getElementById('file-input').addEventListener('change', handleImageUpload);
+        }
+
+        // --- 2. 粒子与纹理 ---
+        function createParticleSystem() {
+            geometry = new THREE.BufferGeometry();
+            const positions = new Float32Array(PARTICLE_COUNT * 3);
+            
+            // 初始随机散落
+            for (let i = 0; i < PARTICLE_COUNT * 3; i++) {
+                positions[i] = (Math.random() - 0.5) * 60;
+            }
+
+            geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+
+            // 生成圆形光点纹理
+            const sprite = getSprite();
+
+            material = new THREE.PointsMaterial({
+                color: state.color,
+                size: PARTICLE_SIZE,
+                map: sprite,
+                blending: THREE.AdditiveBlending,
+                depthWrite: false,
+                transparent: true,
+                opacity: 0.9,
+                vertexColors: false
+            });
+
+            particles = new THREE.Points(geometry, material);
+            scene.add(particles);
+        }
+
+        function getSprite() {
+            const canvas = document.createElement('canvas');
+            canvas.width = 32;
+            canvas.height = 32;
+            const context = canvas.getContext('2d');
+            const gradient = context.createRadialGradient(16, 16, 0, 16, 16, 16);
+            gradient.addColorStop(0, 'rgba(255,255,255,1)');
+            gradient.addColorStop(0.2, 'rgba(255,255,255,0.6)');
+            gradient.addColorStop(1, 'rgba(0,0,0,0)');
+            context.fillStyle = gradient;
+            context.fillRect(0, 0, 32, 32);
+            return new THREE.CanvasTexture(canvas);
+        }
+
+        // --- 3. 形状算法 (核心：圣诞树) ---
+        function generateShapeData() {
+            // 1. 圣诞树 (Spiral Cone)
+            shapes.tree = [];
+            const treeHeight = 14;
+            const maxRadius = 5.5;
+            
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                // 线性分布高度，但稍微聚集在底部
+                const hPercent = i / PARTICLE_COUNT; 
+                const y = (hPercent * treeHeight) - (treeHeight / 2); // 居中Y轴
+                
+                // 半径随高度减小 (Cone)
+                // Math.pow 稍微弯曲边缘让它更像自然树木
+                let radius = (1 - hPercent) * maxRadius;
+                
+                // 螺旋角度 (Golden Angle)
+                const angle = i * 2.4; 
+
+                // 添加随机性让树叶蓬松
+                const rRandom = radius + (Math.random() - 0.5) * 0.5;
+                
+                // 树身
+                let x = Math.cos(angle) * rRandom;
+                let z = Math.sin(angle) * rRandom;
+
+                // 装饰：有极少部分粒子作为“雪花”或“星光”飘在外面
+                if (Math.random() > 0.97) {
+                    x *= 1.5;
+                    z *= 1.5;
+                }
+
+                shapes.tree.push(x, y - 1, z); // y-1 为了稍微下沉一点
+            }
+
+            // 2. 爱心 (用于切换演示)
+            shapes.heart = [];
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                const t = Math.random() * Math.PI * 2;
+                const r = Math.random(); 
+                let x = 16 * Math.pow(Math.sin(t), 3);
+                let y = 13 * Math.cos(t) - 5 * Math.cos(2*t) - 2 * Math.cos(3*t) - Math.cos(4*t);
+                const scale = 0.35;
+                shapes.heart.push(x * scale * Math.sqrt(r), y * scale * Math.sqrt(r), (Math.random()-0.5)*3);
+            }
+        }
+
+        function transitionToShape(shapeName) {
+            state.currentShape = shapeName;
+            const targetData = shapes[shapeName];
+            for (let i = 0; i < PARTICLE_COUNT * 3; i++) {
+                targetPositions[i] = targetData[i] || 0;
+            }
+        }
+
+        // --- 4. 图片上传处理 ---
+        function handleImageUpload(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                const img = new Image();
+                img.onload = function() {
+                    createPhotoMesh(img);
+                };
+                img.src = e.target.result;
+            };
+            reader.readAsDataURL(file);
+        }
+
+        function createPhotoMesh(image) {
+            // 如果已有图片，先移除
+            if (photoMesh) {
+                scene.remove(photoMesh);
+                photoMesh.geometry.dispose();
+                photoMesh.material.map.dispose();
+                photoMesh.material.dispose();
+            }
+
+            const texture = new THREE.Texture(image);
+            texture.colorSpace = THREE.SRGBColorSpace;
+            texture.needsUpdate = true;
+
+            // 保持宽高比
+            const aspect = image.width / image.height;
+            const baseSize = 4; // 基础大小
+            const geometry = new THREE.PlaneGeometry(baseSize * aspect, baseSize);
+            
+            const material = new THREE.MeshBasicMaterial({ 
+                map: texture, 
+                side: THREE.DoubleSide,
+                transparent: true,
+                opacity: 0.9
+            });
+
+            photoMesh = new THREE.Mesh(geometry, material);
+            scene.add(photoMesh);
+
+            // 初始动画效果
+            photoMesh.scale.set(0, 0, 0);
+        }
+
+        // --- 5. MediaPipe 手势识别 ---
+        function initMediaPipe() {
+            const videoElement = document.getElementById('video-element');
+            const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+
+            hands.setOptions({
+                maxNumHands: 2,
+                modelComplexity: 1,
+                minDetectionConfidence: 0.5,
+                minTrackingConfidence: 0.5
+            });
+
+            hands.onResults((results) => {
+                if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                    const landmarks = results.multiHandLandmarks;
+                    
+                    // 计算距离逻辑
+                    let dist = 0.5;
+                    if (landmarks.length === 2) {
+                        // 双手距离
+                        const h1 = landmarks[0][0];
+                        const h2 = landmarks[1][0];
+                        dist = Math.sqrt(Math.pow(h1.x - h2.x, 2) + Math.pow(h1.y - h2.y, 2));
+                        // 映射优化：0.1-0.8 -> 0.2-2.0
+                        dist = Math.max(0.2, Math.min(dist * 3, 2.5));
+                    } else {
+                        // 单手捏合
+                        const thumb = landmarks[0][4];
+                        const index = landmarks[0][8];
+                        const pinch = Math.sqrt(Math.pow(thumb.x - index.x, 2) + Math.pow(thumb.y - index.y, 2));
+                        dist = (pinch * 5) + 0.4; // 简单映射
+                    }
+                    
+                    // 平滑插值更新
+                    state.handDistance += (dist - state.handDistance) * 0.1;
+                } else {
+                    // 无手势时恢复默认呼吸状态 (模拟 0.8 到 1.0 的浮动)
+                    const idle = 0.8 + Math.sin(Date.now() * 0.002) * 0.1;
+                    state.handDistance += (idle - state.handDistance) * 0.05;
+                }
+            });
+
+            const cameraUtils = new Camera(videoElement, {
+                onFrame: async () => await hands.send({image: videoElement}),
+                width: 640,
+                height: 480
+            });
+            
+            cameraUtils.start().then(() => {
+                document.getElementById('loader').style.opacity = 0;
+            });
+        }
+
+        // --- 6. GUI 设置 ---
+        function initGUI() {
+            const gui = new GUI({ title: '控制台' });
+            gui.domElement.style.top = '20px';
+            gui.domElement.style.right = '20px';
+
+            const shapeFolder = gui.addFolder('样式');
+            shapeFolder.add({ shape: 'tree' }, 'shape', {'圣诞树': 'tree', '爱心': 'heart'}).name('形状').onChange(v => {
+                transitionToShape(v);
+                if(v === 'tree') state.color = '#00ff88';
+                if(v === 'heart') state.color = '#ff4466';
+                material.color.set(state.color);
+            });
+            
+            shapeFolder.addColor(state, 'color').name('粒子颜色').onChange(v => material.color.set(v));
+            shapeFolder.add(material, 'size', 0.05, 0.5).name('粒子大小');
+            
+            const photoFolder = gui.addFolder('照片设置');
+            photoFolder.add(state, 'autoRotate').name('自动旋转').onChange(v => controls.autoRotate = v);
+        }
+
+        // --- 7. 动画循环 ---
+        function animate() {
+            requestAnimationFrame(animate);
+            controls.update();
+
+            const positions = particles.geometry.attributes.position.array;
+            
+            // 扩散系数：手势控制
+            const spread = state.handDistance;
+
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                const ix = i * 3;
+                
+                // 获取目标位置并应用扩散系数
+                const tx = targetPositions[ix] * spread;
+                const ty = targetPositions[ix+1] * spread;
+                const tz = targetPositions[ix+2] * spread;
+
+                // 粒子 Lerp 移动
+                positions[ix] += (tx - positions[ix]) * 0.08;
+                positions[ix+1] += (ty - positions[ix+1]) * 0.08;
+                positions[ix+2] += (tz - positions[ix+2]) * 0.08;
+
+                // 圣诞树特效：闪烁
+                if (state.currentShape === 'tree' && Math.random() > 0.995) {
+                   // 可以在这里做颜色闪烁逻辑，如果使用 VertexColors
+                   // 简单起见，我们让它轻微抖动模拟闪烁
+                   positions[ix] += (Math.random()-0.5) * 0.2;
+                }
+            }
+
+            particles.geometry.attributes.position.needsUpdate = true;
+
+            // 照片逻辑
+            if (photoMesh) {
+                // 照片面向相机
+                photoMesh.lookAt(camera.position);
+                
+                // 照片大小跟随手势（在树的中心）
+                // 限制最小大小，以免完全消失
+                const targetScale = Math.max(0.5, spread * 0.8);
+                
+                photoMesh.scale.x += (targetScale - photoMesh.scale.x) * 0.1;
+                photoMesh.scale.y += (targetScale - photoMesh.scale.y) * 0.1;
+                photoMesh.scale.z += (targetScale - photoMesh.scale.z) * 0.1;
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function toggleFullScreen() {
+            if (!document.fullscreenElement) document.documentElement.requestFullscreen();
+            else document.exitFullscreen();
+        }
+
+        // 启动
+        initThree();
+        initGUI();
+        initMediaPipe();
+        animate();
+
+    </script>
+</body>
+</html>
